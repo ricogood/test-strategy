@@ -1,0 +1,196 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+
+data = pd.read_pickle(r"C:\Users\ricog_tb369y6\.spyder-py3\BTCUSDT_4h\BTCUSDT_4h.pkl")
+# data = data[(data['open_time'] <='2022-08-31 23:59:59')]
+data = data[(data['open_time'] >= '2020-01-01 00:00:00' ) & (data['open_time'] <= '2023-06-30 23:59:59')]
+data.reset_index(drop=True, inplace=True)
+Open_time = np.array(data['open_time']).astype('datetime64[m]')
+Funding = np.isin([str(dt)[-5:] for dt in Open_time], ['00:00', '08:00', '16:00'])
+Funding_rate = np.array(data['fundingRate']).astype(float)
+
+
+EMA_period = 20
+ATR_period = EMA_period
+
+
+data['high_low'] = data['high'] - data['low']
+data['high_close'] = np.abs(data['high'] - data['close'].shift())
+data['low_close'] = np.abs(data['low'] - data['close'].shift())
+data['TR'] = data[['high_low', 'high_close', 'low_close']].max(axis=1)
+
+
+data['ATR'] = data['TR'].rolling(window=ATR_period, min_periods=1).mean()
+
+
+data['EMA'] = data['close'].ewm(span=EMA_period, adjust=False).mean()
+
+
+data['upper'] = data['EMA'] + 2.0 * data['ATR']
+data['lower'] = data['EMA'] - 1 * data['ATR']
+
+
+data['long_entry'] = data['close'] > data['upper']
+data['exit_signal'] = data['close'] < data['lower']
+
+
+fee_rate = 0.0004
+initial_capital = 300000.0
+capital = initial_capital
+position = 0.0
+data['portfolio_value'] = capital
+data['position'] = position
+
+
+data['market'] = data['close'] * (initial_capital / data['close'].iloc[0])
+
+
+profits = []
+inmarket = 0
+long_count = 0
+entry_time = None
+
+
+for i in range(1, len(data)):
+    if position == 0:
+        if data.at[i - 1, 'long_entry']:
+            entry_price = data.at[i, 'open']
+            entry_time = data.at[i, 'open_time']
+            position = capital / (entry_price * (1 + fee_rate))
+            capital = 0
+            long_count += 1
+            
+            stop_loss_price = entry_price - 1.5 * data.at[i, 'ATR']
+            
+    if position > 0:
+        inmarket += 1
+        exit_price = data.at[i, 'open']
+        
+        stop_signal = data.at[i-1, 'exit_signal']
+        stop_loss = data.at[i-1, 'close'] <= stop_loss_price
+        
+        if stop_loss or stop_signal:
+            realized_profit = position * (exit_price - entry_price)
+            profits.append(realized_profit - (entry_price + exit_price) * fee_rate * position)
+            capital = position * (exit_price * (1 - fee_rate))
+            position = 0
+            
+    data.at[i, 'portfolio_value'] = capital + position * data.at[i, 'open']
+    data.at[i, 'position'] = position
+    if Funding[i]:
+        if position > 0:
+            funding_fee = position * data.at[i,'open'] * Funding_rate[i]
+            data.at[i, 'portfolio_value'] -= funding_fee
+            capital -= funding_fee
+          
+
+# data['portfolio_value'].fillna(method='ffill', inplace=True)
+# data['portfolio_value'].fillna(method='bfill', inplace=True)
+
+
+years = (data['open_time'].iloc[-1] - data['open_time'].iloc[0]).days / 365.25
+total_return = (data['portfolio_value'].iloc[-1] / initial_capital - 1) * 100
+annual_return = ((data['portfolio_value'].iloc[-1] / initial_capital) ** (1 / years) - 1) * 100
+data['returns'] = data['portfolio_value'].pct_change()
+
+
+annual_volatility = data['returns'].std() * np.sqrt(365 * 6) * 100
+
+sharpe_ratio = (data['returns'].mean() / data['returns'].std()) * np.sqrt(365 * 6 * 1)
+max_drawdown = abs((data['portfolio_value'] / data['portfolio_value'].cummax() - 1).min() * 100)
+calmarratio = annual_return / abs(max_drawdown) if max_drawdown != 0 else np.nan
+win_rate = len([p for p in profits if p > 0]) / len(profits) if profits else np.nan
+
+
+risk_reward_ratio = total_return / max_drawdown if max_drawdown != 0 else np.nan
+
+
+print(f"Total Return: {total_return:.2f}%")
+print(f"Annualized Return (CAGR): {annual_return:.2f}%")
+print(f"Annualized Volatility: {annual_volatility:.2f}%")
+print(f"Sharpe Ratio: {sharpe_ratio:.2f}")
+print(f"Max Drawdown: {max_drawdown:.2f}%")
+print(f"Entry count: {long_count}")
+print(f"Calmar Ratio: {calmarratio:.2f}")
+print(f"Win Rate: {win_rate:.2f}")
+print(f"Risk Reward Ratio: {risk_reward_ratio:.2f}")
+print(f"Inmarket ratio: {inmarket/len(data):.2f}")
+
+
+
+plt.figure(figsize=(14, 7))
+plt.plot(data['open_time'], data['portfolio_value'], label='equity')
+plt.plot(data['open_time'], data['market'], label='market')
+plt.title('Portfolio value')
+plt.xlabel('Time')
+plt.ylabel('value')
+plt.legend()
+plt.show()
+
+split_time = pd.to_datetime('2022-09-01 00:00:00')
+data['cumulative_returns'] = (data['portfolio_value'] / initial_capital - 1) * 100
+data['market_cumulative_returns'] = (data['market'] / initial_capital - 1) * 100
+
+
+data['max_portfolio_value'] = data['portfolio_value'].cummax()
+data['drawdown'] = (data['portfolio_value'] / data['max_portfolio_value']) - 1
+
+
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
+
+
+ax1.plot(data['open_time'], data['cumulative_returns'], color='red')
+ax1.plot(data['open_time'], data['market_cumulative_returns'], color='orange', label='Market')
+ax1.axvline(x=split_time, color='blue', linestyle='--')
+ax1.set_title('Cumulative Returns')
+ax1.set_ylabel('Cumulative Returns (%)')
+ax1.legend(loc='upper left')
+ax1.grid(True)
+
+
+ax2.fill_between(data['open_time'], data['drawdown'] * 100, color='red')
+ax2.axvline(x=split_time, color='blue', linestyle='--')
+ax2.set_title('Underwater Plot')
+ax2.set_ylabel('Drawdown (%)')
+ax2.set_xlabel('Time')
+ax2.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+
+# data['open_time'] = pd.to_datetime(data['open_time'])
+
+
+# data.set_index('open_time', inplace=True)
+
+
+# monthly_data = data['portfolio_value'].resample('M').last()
+# monthly_returns = monthly_data.pct_change().dropna()
+
+
+# monthly_returns.index = pd.MultiIndex.from_arrays([monthly_returns.index.year, monthly_returns.index.month],
+#                                                   names=['Year', 'Month'])
+
+
+# monthly_returns_df = monthly_returns.unstack(level='Month')
+
+
+# monthly_returns_df = monthly_returns_df.loc[2020:2023]
+
+
+# plt.figure(figsize=(10, 6))
+# sns.heatmap(monthly_returns_df, annot=True, cmap='OrRd', center=0, fmt=".2f")
+# plt.title('Monthly Returns (2020-2023)')
+# plt.xlabel('Month')
+# plt.ylabel('Year')
+# plt.show()
+
+
+
+
+
+
